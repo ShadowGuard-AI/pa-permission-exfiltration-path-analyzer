@@ -94,6 +94,7 @@ def resolve_user(user: str) -> Optional[Tuple[int, Set[int]]]:
         return None
 
     group_ids = {entry.pw_gid}
+    # I rebuild the group set from the whole group database on every call, and check_permission calls this for every node in the walk. On a big tree that cost dwarfs the stat calls, and nothing caches it because the user never changes mid run.
     for group in grp.getgrall():
         if user in group.gr_mem:
             group_ids.add(group.gr_gid)
@@ -117,6 +118,7 @@ def check_permission(filepath: str, user: str, check_write: bool = False) -> boo
         bool: True if the user has the specified permissions, False otherwise.
     """
 
+    # An unknown user reads as no access here instead of an error, because this helper is called deep inside the walk. Main checks the user once up front so a real run refuses a bad name before any of this matters.
     resolved = resolve_user(user)
     if resolved is None:
         logging.error(f"User does not exist: {user}")
@@ -127,6 +129,7 @@ def check_permission(filepath: str, user: str, check_write: bool = False) -> boo
         st = os.stat(filepath)
         mode = st.st_mode
 
+        # The class choice is first match: owner, then group, then other, exactly like the kernel. A user who owns a file never falls through to the group bits even when those are wider, and there is no ACL or execute bit check here, so a directory result is about its read bit, not about whether the user could actually traverse it.
         if user_id == st.st_uid:
             return bool(mode & (0o200 if check_write else 0o400))
         if st.st_gid in group_ids:
@@ -166,12 +169,14 @@ def find_potential_paths(
             GitWildMatchPattern, ignore_patterns
         )
 
+    # There is no visited set and no depth limit in this walk. A symlink cycle under the root makes the recursion follow the link round again, deeper each time, until Python stops it, so a tree with a loop in it is a known bad input for this tool.
     def explore_path(current_path: List[str], current_dir: str):
         """Recursive helper function to explore the directory tree."""
         nonlocal paths
 
         if ignore_spec:
             relative_dir = os.path.relpath(current_dir, root_dir)
+            # I test the pattern against both the relative and the absolute spelling of the same folder. Patterns written for one shape often miss the other, and checking both is cheaper than explaining to a caller why their ignore did nothing.
             if ignore_spec.match_file(relative_dir) or ignore_spec.match_file(current_dir):
                 logging.debug(f"Ignoring directory: {current_dir}")
                 return
@@ -182,10 +187,12 @@ def find_potential_paths(
 
         current_path.append(current_dir)  # Add current directory to the path
 
+        # I compare absolute paths, not resolved ones. Reach the same target through a symlink and the strings differ, so the walk passes through the real target without ever recording it.
         if os.path.abspath(current_dir) == os.path.abspath(target_file):
             # A path is recorded only when the walk reaches the target
             # itself, and the permission check above has just tested the
             # target's own permission for the named user.
+            # The copy matters because current_path is one list mutated by the whole walk. Storing it directly would leave every recorded path showing whatever the walk ended on.
             paths.append(current_path.copy())  # Found a path, add it to the results
             current_path.pop() # remove current dir from the path
             return
