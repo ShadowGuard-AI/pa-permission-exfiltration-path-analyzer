@@ -7,14 +7,17 @@ Identifies chains of permission grants that could allow unintended access to cri
 """
 
 import argparse
+import grp
 import logging
 import os
+import pwd
 import sys
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 # Optional dependencies (install with pip install pathspec rich)
 try:
     import pathspec
+    from pathspec.patterns import GitWildMatchPattern
     from rich.console import Console
     from rich.table import Table
     HAS_RICH = True
@@ -78,10 +81,32 @@ def setup_argparse() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_user(user: str) -> Optional[Tuple[int, Set[int]]]:
+    """
+    Resolves a user name to its uid and the set of group ids it belongs
+    to (its primary group plus every group that lists it as a member).
+
+    Returns None when the user does not exist.
+    """
+    try:
+        entry = pwd.getpwnam(user)
+    except KeyError:
+        return None
+
+    group_ids = {entry.pw_gid}
+    for group in grp.getgrall():
+        if user in group.gr_mem:
+            group_ids.add(group.gr_gid)
+    return entry.pw_uid, group_ids
+
+
 def check_permission(filepath: str, user: str, check_write: bool = False) -> bool:
     """
-    Checks if a user has read or write permissions to a file.  This is a simplified
-    implementation and does not cover all possible permission scenarios.
+    Checks if the named user has read or write permission on a path, using
+    the permission class that applies to that user: the owner bits when
+    the user owns the file, the group bits when the user belongs to the
+    file's group, and the other bits otherwise. This is a simplified
+    implementation: ACLs are not consulted.
 
     Args:
         filepath (str): The path to the file.
@@ -92,27 +117,21 @@ def check_permission(filepath: str, user: str, check_write: bool = False) -> boo
         bool: True if the user has the specified permissions, False otherwise.
     """
 
+    resolved = resolve_user(user)
+    if resolved is None:
+        logging.error(f"User does not exist: {user}")
+        return False
+    user_id, group_ids = resolved
+
     try:
-        # Basic check: Does the user have read or write permissions based on file mode?
-        # This is a simplification and will need to be expanded for real-world use cases.
-        mode = os.stat(filepath).st_mode
-        uid = os.stat(filepath).st_uid
-        gid = os.stat(filepath).st_gid
-        user_id = os.getuid()  # Assuming current user ID for simplicity
+        st = os.stat(filepath)
+        mode = st.st_mode
 
-        # Check if the user is the owner and has appropriate permissions.
-        if user_id == uid:
-            if check_write:
-                if mode & 0o200: # Owner write
-                    return True
-            else:
-                if mode & 0o400: # Owner read
-                    return True
-
-        # Expand this logic based on real-world scenarios (ACLs, groups, etc.).
-        # This is a placeholder and needs significant expansion for practical use.
-        # Consider using libraries like `acl` (linux) for handling ACLs.
-        return False # Default to False if no explicit permission found
+        if user_id == st.st_uid:
+            return bool(mode & (0o200 if check_write else 0o400))
+        if st.st_gid in group_ids:
+            return bool(mode & (0o020 if check_write else 0o040))
+        return bool(mode & (0o002 if check_write else 0o004))
     except Exception as e:
         logging.error(f"Error checking permission for {filepath}: {e}")
         return False
@@ -143,15 +162,19 @@ def find_potential_paths(
     paths: List[List[str]] = []
     ignore_spec = None
     if ignore_patterns:
-        ignore_spec = pathspec.PathSpec.from_glob(ignore_patterns)
+        ignore_spec = pathspec.PathSpec.from_lines(
+            GitWildMatchPattern, ignore_patterns
+        )
 
     def explore_path(current_path: List[str], current_dir: str):
         """Recursive helper function to explore the directory tree."""
         nonlocal paths
 
-        if ignore_spec and ignore_spec.match_file(current_dir):
-            logging.debug(f"Ignoring directory: {current_dir}")
-            return
+        if ignore_spec:
+            relative_dir = os.path.relpath(current_dir, root_dir)
+            if ignore_spec.match_file(relative_dir) or ignore_spec.match_file(current_dir):
+                logging.debug(f"Ignoring directory: {current_dir}")
+                return
 
         if not check_permission(current_dir, user, check_write):
             logging.debug(f"No access to {current_dir} for {user}")
@@ -159,7 +182,10 @@ def find_potential_paths(
 
         current_path.append(current_dir)  # Add current directory to the path
 
-        if os.path.abspath(current_dir) == os.path.abspath(target_file) or os.path.join(current_dir, os.path.basename(target_file)) == target_file:
+        if os.path.abspath(current_dir) == os.path.abspath(target_file):
+            # A path is recorded only when the walk reaches the target
+            # itself, and the permission check above has just tested the
+            # target's own permission for the named user.
             paths.append(current_path.copy())  # Found a path, add it to the results
             current_path.pop() # remove current dir from the path
             return
@@ -201,9 +227,13 @@ def main():
         logging.error(f"Root directory '{root_dir}' does not exist.")
         sys.exit(1)
 
+    if resolve_user(user) is None:
+        logging.error(f"User '{user}' does not exist. No analysis was run.")
+        sys.exit(1)
+
     if not os.path.exists(target_file):
-         logging.warning(f"Target file '{target_file}' does not exist. Continuing search for potential paths leading to it.")
-         # sys.exit(1)  # Commented out so that we can continue looking for path prefixes that might eventually lead to a target_file that will exist in the future.
+        logging.error(f"Target file '{target_file}' does not exist. No analysis was run.")
+        sys.exit(1)
 
     logging.info(f"Starting permission path analysis for user '{user}'...")
     logging.debug(f"Root directory: {root_dir}")
