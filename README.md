@@ -2,18 +2,18 @@
 Analyzes potential paths to sensitive data based on existing permissions. Identifies chains of permission grants that could allow unintended access to critical resources. Despite the name, this tool moves no data: it reads permission modes under the root directory the operator names and prints the paths it finds to the console only. - Focused on Tools for analyzing and assessing file system permissions
 
 ## Install
-`git clone https://github.com/ShadowGuardAI/pa-permission-exfiltration-path-analyzer`
+`git clone https://github.com/ShadowGuard-AI/pa-permission-exfiltration-path-analyzer`
 
 ## Usage
-`python3 main.py -r [root] -t [target] -u [user] [params]`
+`python3 main.py -u USER -t TARGET [options]`
 
 ## Parameters
 - `-h`: Show help message and exit
-- `-r`: Root directory to start the analysis from. Defaults to current directory.
-- `-u`: User to simulate access for. The user must exist on this system.
-- `-t`: Target file or directory to check access to. The target must exist.
-- `-i`: List of glob patterns to ignore (e.g., '*.tmp' '*/temp/*'). Patterns are matched against paths relative to the root directory.
-- `-v`: Enable verbose output.
+- `-r`, `--root-dir`: Root directory to start the analysis from. Defaults to current directory.
+- `-u`, `--user`: (required) User to simulate access for. The user must exist on this system.
+- `-t`, `--target-file`: (required) Target file or directory to check access to. The target must exist.
+- `-i`, `--ignore-patterns`: List of glob patterns to ignore (e.g., '*.tmp' '*/temp/*'). Patterns are matched against paths relative to the root directory.
+- `-v`, `--verbose`: Enable verbose output.
 - `--check-write`: Check for write access instead of read access.
 
 ## Behavior notes
@@ -21,4 +21,4 @@ Analyzes potential paths to sensitive data based on existing permissions. Identi
 - A path is reported only when the walk reaches the target itself and the named user's permission check passes on the target's own entry, so a reported path ends at the target, not at the directory holding it. A target that does not exist is an error: the run prints that no analysis was run and exits 1, and no path is reported for it.
 
 ## License
-Copyright (c) ShadowGuardAI
+See LICENSE.
